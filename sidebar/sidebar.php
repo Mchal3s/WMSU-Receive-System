@@ -4,7 +4,7 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 // BASE PATH (IMPORTANT)
-$base = '/RecordSystem-main/';
+$base = '/WMSU-Receive-System/';
 
 // Detect current page + folder
 $current_page = basename($_SERVER['PHP_SELF']);
@@ -55,7 +55,10 @@ $isReceivingActive = (
             <li>
                 <?= navLink($base . 'archive.php', 'fa-archive', 'Archive', 'archive.php') ?>
             </li>
-
+            <!-- REPORTS -->
+            <li>
+                <?= navLink($base . 'reports/reports.php', 'fa-chart-bar', 'Reports', 'reports.php', 'reports') ?>
+            </li>
             <!-- RECEIVING (CLICKABLE + DROPDOWN) -->
             <li>
 
@@ -95,7 +98,12 @@ $isReceivingActive = (
                            Release
                         </a>
                     </li>
-
+                    <li>
+                        <a href="<?= $base ?>reports/reports.php"
+                           class="block px-4 py-2 rounded-lg text-sm <?= ($current_page === 'reports.php') ? 'bg-red-700 font-semibold' : 'hover:bg-red-700' ?>">
+                           Reports
+                        </a>
+                    </li>
                 </ul>
 
             </li>

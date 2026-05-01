@@ -139,7 +139,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['_memo_submit'])) {
             $document_label = ucwords(str_replace('_', ' ', $document_type));
             $sender_name    = $user_email ?: 'WMSU Records Office';
             $date_sent      = date('F d, Y \a\t h:i A');
-            $base_url       = 'http://' . $_SERVER['HTTP_HOST'] . '/RecordSystem';
+            $base_url = 'http://' . $_SERVER['HTTP_HOST'] . '/WMSU-Receive-System';
 
             foreach ($receivers_data as $receiver) {
                 if (empty($receiver['email'])) continue;
