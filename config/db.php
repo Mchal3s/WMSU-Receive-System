@@ -1,6 +1,6 @@
 <?php
 // ============================================================
-// db.php  —  PDO connection (place in /RecordSystem/config/)
+// db.php  —  PDO connection (place in /WMSU-Receive-System/config/)
 // ============================================================
 
 define('DB_HOST', 'localhost');

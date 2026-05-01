@@ -10,6 +10,29 @@ $base = '/WMSU-Receive-System/';
 $current_page = basename($_SERVER['PHP_SELF']);
 $current_dir  = basename(dirname($_SERVER['PHP_SELF']));
 
+// Fetch unread inbox count for the current user on every page
+// (inbox.php sets $inbox_unread itself before including sidebar,
+//  so we only query here when it hasn't been set yet)
+if (!isset($inbox_unread) && !empty($_SESSION['user_email'])) {
+    // db.php is already loaded by every page that includes this sidebar,
+    // but guard with function_exists just in case
+    if (function_exists('getPDO')) {
+        try {
+            $pdo_sidebar = getPDO();
+            $s = $pdo_sidebar->prepare(
+                "SELECT COUNT(*) FROM document_recipients
+                 WHERE recipient_email = ? AND status IN ('Pending', 'Sent')"
+            );
+            $s->execute([$_SESSION['user_email']]);
+            $inbox_unread = (int) $s->fetchColumn();
+        } catch (Exception $e) {
+            $inbox_unread = 0;
+        }
+    } else {
+        $inbox_unread = 0;
+    }
+}
+
 // NAV LINK FUNCTION
 function navLink($href, $icon, $label, $matchPage, $matchDir = '') {
     global $current_page, $current_dir;
@@ -27,14 +50,33 @@ function navLink($href, $icon, $label, $matchPage, $matchDir = '') {
     ";
 }
 
-// RECEIVING ACTIVE (main.php + inbox)
-$isReceivingActive = (
-    $current_page === 'main.php' ||
-    $current_dir === 'inbox'
-);
+// INBOX NAV LINK — same as navLink() but with an unread badge
+function inboxNavLink($href, $matchPage) {
+    global $current_page, $inbox_unread;
+
+    $isActive = ($current_page === $matchPage);
+    $classes  = $isActive ? 'bg-red-700 font-semibold' : 'hover:bg-red-800';
+
+    $badge = (!empty($inbox_unread) && $inbox_unread > 0)
+        ? '<span class="ml-auto bg-white text-red-900 text-xs font-bold rounded-full min-w-[20px] h-5 flex items-center justify-center px-1.5 leading-none">'
+          . ($inbox_unread > 99 ? '99+' : $inbox_unread)
+          . '</span>'
+        : '';
+
+    return "
+        <a href=\"{$href}\" class=\"flex items-center px-4 py-3 rounded-lg transition-colors {$classes}\">
+            <span class=\"mr-3\"><i class=\"fa-solid fa-inbox\"></i></span>
+            Inbox
+            {$badge}
+        </a>
+    ";
+}
 ?>
 
-<aside class="fixed top-0 left-0 h-full w-64 bg-red-900 text-white flex flex-col justify-between shadow-2xl z-40">
+<!-- Mobile overlay backdrop -->
+<div id="sidebarOverlay" class="fixed inset-0 bg-black/50 z-30 hidden lg:hidden" onclick="closeSidebar()"></div>
+
+<aside id="sidebar" class="fixed top-0 left-0 h-full w-64 bg-red-900 text-white flex flex-col justify-between shadow-2xl z-40 -translate-x-full lg:translate-x-0 transition-transform duration-300">
 
     <!-- Branding -->
     <div class="bg-red-800 px-6 py-6 border-b border-red-700">
@@ -51,61 +93,24 @@ $isReceivingActive = (
                 <?= navLink($base . 'dashboard/dashboard.php', 'fa-house', 'Dashboard', 'dashboard.php', 'dashboard') ?>
             </li>
 
+            <!-- RECEIVING -->
+            <li>
+                <?= navLink($base . 'pages/receiving.php', 'fa-receipt', 'Receiving', 'receiving.php') ?>
+            </li>
+
+            <!-- INBOX (with unread badge) -->
+            <li>
+                <?= inboxNavLink($base . 'pages/inbox.php', 'inbox.php') ?>
+            </li>
+
+            <!-- RELEASE -->
+            <li>
+                <?= navLink($base . 'pages/release.php', 'fa-paper-plane', 'Release', 'release.php') ?>
+            </li>
+
             <!-- ARCHIVE -->
             <li>
                 <?= navLink($base . 'archive.php', 'fa-archive', 'Archive', 'archive.php') ?>
-            </li>
-            <!-- REPORTS -->
-            <li>
-                <?= navLink($base . 'reports/reports.php', 'fa-chart-bar', 'Reports', 'reports.php', 'reports') ?>
-            </li>
-            <!-- RECEIVING (CLICKABLE + DROPDOWN) -->
-            <li>
-
-                <div class="flex items-center">
-
-                    <!-- CLICKABLE MAIN -->
-                    <a href="<?= $base ?>main/main.php"
-                       class="flex-1 flex items-center px-4 py-3 rounded-l-lg transition-colors <?= $isReceivingActive ? 'bg-red-700 font-semibold' : 'hover:bg-red-800' ?>">
-                        
-                        <span class="mr-3"><i class="fa-solid fa-receipt"></i></span>
-                        Receiving
-                    </a>
-
-                    <!-- DROPDOWN BUTTON -->
-                    <button onclick="toggleDropdown('receivingMenu')" 
-                        class="px-3 py-3 rounded-r-lg <?= $isReceivingActive ? 'bg-red-700' : 'hover:bg-red-800' ?>">
-                        
-                        <i id="receivingArrow"
-                           class="fa-solid fa-chevron-down text-sm transition-transform <?= $isReceivingActive ? 'rotate-180' : '' ?>">
-                        </i>
-                    </button>
-
-                </div>
-
-                <!-- DROPDOWN MENU -->
-                <ul id="receivingMenu" class="<?= $isReceivingActive ? '' : 'hidden' ?> ml-6 mt-2 space-y-1">
-
-                    <li>
-                        <a href="<?= $base ?>inbox/inbox.php"
-                           class="block px-4 py-2 rounded-lg text-sm <?= ($current_page === 'inbox.php') ? 'bg-red-700 font-semibold' : 'hover:bg-red-700' ?>">
-                           Inbox
-                        </a>
-                    </li>
-                    <li>
-                        <a href="<?= $base ?>release/release.php"
-                           class="block px-4 py-2 rounded-lg text-sm <?= ($current_page === 'release.php') ? 'bg-red-700 font-semibold' : 'hover:bg-red-700' ?>">
-                           Release
-                        </a>
-                    </li>
-                    <li>
-                        <a href="<?= $base ?>reports/reports.php"
-                           class="block px-4 py-2 rounded-lg text-sm <?= ($current_page === 'reports.php') ? 'bg-red-700 font-semibold' : 'hover:bg-red-700' ?>">
-                           Reports
-                        </a>
-                    </li>
-                </ul>
-
             </li>
 
             <!-- INVENTORY -->
@@ -114,6 +119,11 @@ $isReceivingActive = (
             </li>
 
         </ul>
+
+    
+    </nav>
+    
+ 
 
         <hr class="my-6 border-red-700">
 
@@ -132,25 +142,7 @@ $isReceivingActive = (
         <a href="<?= $base ?>logout.php" class="flex items-center px-4 py-3 rounded-lg hover:bg-red-800 transition-colors">
             <span class="mr-3"><i class="fa-solid fa-right-from-bracket"></i></span> Logout
         </a>
-    </nav>
-
-    <!-- BOTTOM BUTTON -->
-    <div class="px-4 py-6 flex justify-center">
-        <button class="bg-red-700 w-12 h-12 rounded-full flex items-center justify-center shadow-lg hover:bg-red-600 transition-colors">
-            <i class="fa-solid fa-envelope text-white"></i>
-        </button>
-    </div>
 </aside>
 
 <!-- FONT AWESOME -->
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
-
-<script>
-function toggleDropdown(id) {
-    const menu = document.getElementById(id);
-    const arrow = document.getElementById('receivingArrow');
-
-    menu.classList.toggle('hidden');
-    arrow.classList.toggle('rotate-180');
-}
-</script>

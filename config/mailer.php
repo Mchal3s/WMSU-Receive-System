@@ -1,7 +1,7 @@
 <?php
 // ============================================================
 // mailer.php — PHPMailer config
-// Place this in /RecordSystem/config/mailer.php
+// Place this in /WMSU-Receive-System/config/mailer.php
 // ============================================================
 
 use PHPMailer\PHPMailer\PHPMailer;
