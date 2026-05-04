@@ -101,18 +101,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $validation_errors[] = 'Please select at least one receiver.';
     }
     
-    // Validate document type specific fields
+    // Handle faculty arrays for memorandum, special order, AND travel order
+    $concerned_faculty_str = '';
+    if ($document_type === 'memorandum' || $document_type === 'special_order' || $document_type === 'travel_order') {
+        $faculties = array_filter(array_map('trim', $_POST['concerned_faculty'] ?? []));
+        if (empty($faculties)) {
+            $validation_errors[] = 'Concerned Faculty is required.';
+        } else {
+            $concerned_faculty_str = implode(', ', $faculties);
+        }
+    }
+    
+    // Other document-specific validations
     if ($document_type === 'memorandum') {
         if (empty($_POST['mo_number'])) $validation_errors[] = 'M.O. Number is required.';
-        if (empty($_POST['concerned_faculty'])) $validation_errors[] = 'Concerned Faculty is required.';
         if (empty($_POST['subject'])) $validation_errors[] = 'Subject is required.';
     } elseif ($document_type === 'special_order') {
         if (empty($_POST['so_number'])) $validation_errors[] = 'S.O. Number is required.';
-        if (empty($_POST['concerned_faculty'])) $validation_errors[] = 'Concerned Faculty is required.';
         if (empty($_POST['subject'])) $validation_errors[] = 'Subject is required.';
     } elseif ($document_type === 'travel_order') {
         if (empty($_POST['io_number'])) $validation_errors[] = 'T.O. Number is required.';
-        if (empty($_POST['employee_name'])) $validation_errors[] = 'Employee Name is required.';
         if (empty($_POST['subject'])) $validation_errors[] = 'Subject is required.';
     }
     
@@ -187,7 +195,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $document_number,
                         date('Y'),
                         date('F'),
-                        $_POST['concerned_faculty'] ?? '',
+                        $concerned_faculty_str,
                         $_POST['college_dept'] ?? '',
                         $_POST['subject'] ?? '',
                         $_POST['date_issued'] ?? date('Y-m-d'),
@@ -220,7 +228,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $document_number,
                         date('Y'),
                         date('F'),
-                        $_POST['concerned_faculty'] ?? '',
+                        $concerned_faculty_str,
                         $_POST['subject'] ?? '',
                         $_POST['date_issued'] ?? date('Y-m-d'),
                         $_POST['effectivity'] ?? null,
@@ -250,7 +258,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $document_number,
                         date('Y'),
                         date('F'),
-                        $_POST['employee_name'] ?? '',
+                        $concerned_faculty_str, // faculty names stored in employee_name column
                         $_POST['office'] ?? '',
                         $_POST['subject'] ?? '',
                         $_POST['date_issued'] ?? date('Y-m-d'),
@@ -271,6 +279,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 
                 // Save files to document_files table
+                $document_type_file_map = [
+                    'memorandum'    => 'memorandum_order',
+                    'special_order' => 'special_order',
+                    'travel_order'  => 'travel_order',
+                ];
+                $document_type_for_files = $document_type_file_map[$document_type] ?? $document_type;
                 if (!empty($saved_files)) {
                     $file_stmt = $pdo->prepare("
                         INSERT INTO document_files 
@@ -280,13 +294,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     
                     foreach ($saved_files as $f) {
                         $file_stmt->execute([
-                            $document_type,
+                            $document_type_for_files,
                             $document_id,
                             $f['original_name'],
                             $f['stored_name'],
                             $f['file_path'],
                             $f['mime'],
-                            $f['size']
+                            $f['size'],
                         ]);
                     }
                 }
@@ -326,7 +340,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $receivers_data = $stmt->fetchAll();
                     
                     $sender_name = $_SESSION['full_name'] ?? $user_email;
-                    $base_url = 'http://' . $_SERVER['HTTP_HOST'] . '/WMSU-Receive-System';
+                    $_app_root2 = rtrim(str_replace('\\', '/', realpath(__DIR__ . '/..')), '/');
+                    $_doc_root2 = rtrim(str_replace('\\', '/', realpath($_SERVER['DOCUMENT_ROOT'])), '/');
+                    $_rel2 = str_replace($_doc_root2, '', $_app_root2);
+                    $base_url = 'http://' . $_SERVER['HTTP_HOST'] . rtrim($_rel2, '/');
                     
                     foreach ($receivers_data as $receiver) {
                         if (empty($receiver['email'])) continue;
@@ -335,20 +352,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $token = bin2hex(random_bytes(32));
                         
                         // Insert into document_recipients
-// Insert into document_recipients
-$recipient_stmt = $pdo->prepare("
-    INSERT INTO document_recipients 
-        (document_type, document_id, recipient_id, recipient_email, recipient_name, status, confirmation_token)
-    VALUES (?, ?, ?, ?, ?, 'Pending', ?)
-");
-$recipient_stmt->execute([
-    ucwords(str_replace('_', ' ', $document_type)),
-    $document_id,
-    $receiver['id'],
-    $receiver['email'],
-    $receiver['full_name'],
-    $token
-]);
+                        $recipient_stmt = $pdo->prepare("
+                            INSERT INTO document_recipients 
+                                (document_type, document_id, recipient_id, recipient_email, recipient_name, status, confirmation_token)
+                            VALUES (?, ?, ?, ?, ?, 'Pending', ?)
+                    ");
+                    $recipient_stmt->execute([
+                        $document_label,                                 
+                        $document_id,
+                        $receiver['id'],
+                        $receiver['email'],
+                        $receiver['full_name'],
+                        $token
+                    ]);
                         
                         $confirm_url = $base_url . '/acknowledge.php?token=' . urlencode($token) . '&action=confirm';
                         $download_url = $base_url . '/acknowledge.php?token=' . urlencode($token) . '&action=download';
@@ -401,7 +417,7 @@ $recipient_stmt->execute([
                                                         <p><strong>Recipient:</strong> ' . htmlspecialchars($receiver['full_name']) . '</p>
                                                         <p><strong>Sent By:</strong> ' . htmlspecialchars($sender_name) . '</p>
                                                         <p><strong>Date:</strong> ' . date('F d, Y \a\t h:i A') . '</p>
-                                                    </td></tr>
+                                                    </td></table>
                                                 </table>
                                                 
                                                 <p><strong>Attached Files:</strong></p>
@@ -421,7 +437,7 @@ $recipient_stmt->execute([
                                                         </td>
                                                     </tr>
                                                 </table>
-                                             </td>
+                                              </td>
                                         </tr>
                                         <tr>
                                             <td style="background:#f9fafb;border-top:1px solid #e5e7eb;padding:20px;text-align:center;">
@@ -455,13 +471,13 @@ $recipient_stmt->execute([
                                 INSERT INTO notifications (user_id, notification_type, title, message, document_type, document_id)
                                 VALUES (?, 'Document Released', ?, ?, ?, ?)
                             ");
-$notif_stmt->execute([
-    $receiver['id'], // the actual recipient
-    'Document Released: ' . $document_label,
-    "Document {$document_number} has been released to you by {$sender_name}",
-    $document_label_map[$document_type] ?? $document_label,
-    $document_id
-]);
+                            $notif_stmt->execute([
+                                $receiver['id'],
+                                'Document Released: ' . $document_label,
+                                "Document {$document_number} has been released to you by {$sender_name}",
+                                $document_label_map[$document_type] ?? $document_label,
+                                $document_id
+                            ]);
                             
                         } catch (Exception $e) {
                             $mail_errors[] = "Could not send to {$receiver['full_name']}: " . $e->getMessage();
@@ -565,32 +581,33 @@ $avatar_colors = [
             max-height: 80vh;
             overflow-y: auto;
         }
-        .ac-wrapper { position: relative; }
-        .ac-dropdown {
+        /* Autocomplete global dropdown */
+        #globalAcDropdown {
             display: none;
             position: absolute;
-            top: 100%;
-            left: 0;
-            right: 0;
-            z-index: 50;
+            z-index: 9999;
             background: #fff;
             border: 1px solid #e5e7eb;
             border-radius: 8px;
-            box-shadow: 0 4px 12px rgba(0,0,0,.1);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
             max-height: 200px;
             overflow-y: auto;
+            min-width: 250px;
         }
-        .ac-dropdown.is-open { display: block; }
-        .ac-item {
+        #globalAcDropdown .ac-item {
             padding: 10px 14px;
             cursor: pointer;
             border-bottom: 1px solid #f3f4f6;
         }
-        .ac-item:last-child { border-bottom: none; }
-        .ac-item:hover { background: #FFCCCE; }
-        .ac-item-name { font-size: 14px; font-weight: 600; color: #111827; }
-        .ac-item-meta { font-size: 12px; color: #9CA3AF; margin-top: 2px; }
-        .ac-empty { padding: 10px 14px; font-size: 13px; color: #9CA3AF; }
+        #globalAcDropdown .ac-item:last-child { border-bottom: none; }
+        #globalAcDropdown .ac-item:hover { background: #FFCCCE; }
+        #globalAcDropdown .ac-item-name { font-size: 14px; font-weight: 600; color: #111827; }
+        #globalAcDropdown .ac-item-meta { font-size: 12px; color: #9CA3AF; margin-top: 2px; }
+        #globalAcDropdown .ac-empty { padding: 10px 14px; font-size: 13px; color: #9CA3AF; }
+
+        .mp-fac-remove-btn { transition: all 0.2s; }
+        .mp-fac-row { transition: all 0.2s; }
+        .ac-wrapper { position: relative; }
     </style>
 </head>
 <body class="bg-gray-100">
@@ -601,26 +618,24 @@ $avatar_colors = [
         <header class="bg-white shadow-sm sticky top-0 z-20">
             <div class="px-4 sm:px-6 lg:px-8 py-4">
                 <div class="flex items-center justify-between">
-                    <div class="flex items-center gap-3 min-w-0">
-                        <button id="burgerBtn" class="lg:hidden flex flex-col justify-center items-center w-10 h-10 rounded-lg hover:bg-gray-100 transition-colors flex-shrink-0">
+                    <div class="flex items-center gap-3">
+                        <button id="burgerBtn" class="lg:hidden flex flex-col justify-center items-center w-10 h-10 rounded-lg hover:bg-gray-100 transition-colors flex-shrink-0" aria-label="Toggle menu">
                             <span class="block w-5 h-0.5 bg-gray-700 mb-1 rounded"></span>
                             <span class="block w-5 h-0.5 bg-gray-700 mb-1 rounded"></span>
                             <span class="block w-5 h-0.5 bg-gray-700 rounded"></span>
                         </button>
-                        <div class="min-w-0">
-                            <h2 class="text-xl sm:text-2xl font-bold text-gray-800 font-main truncate">Receiving Department</h2>
-                            <p class="hidden sm:block text-sm text-gray-600 mt-1 font-secondary">Process and verify incoming documents</p>
+                        <div>
+                            <h2 class="text-2xl font-bold text-gray-800 font-main mb-1">Receiving Department</h2>
+                            <p class="text-sm text-gray-600 font-secondary">Process and verify incoming documents</p>
                         </div>
                     </div>
-                    <div class="flex items-center space-x-4">
-                        <div class="flex items-center space-x-3">
-                            <div class="hidden sm:block text-right">
-                                <p class="text-sm font-semibold text-gray-800 font-secondary"><?= htmlspecialchars($user_email ?: 'Guest User') ?></p>
-                                <p class="text-xs text-gray-600 font-secondary"><?= htmlspecialchars($user_role_display) ?></p>
-                            </div>
-                            <div class="w-10 h-10 bg-crimson-700 rounded-full flex items-center justify-center">
-                                <span class="text-white font-semibold font-secondary"><?= htmlspecialchars($user_initials) ?></span>
-                            </div>
+                    <div class="flex items-center gap-3">
+                        <div class="hidden sm:block text-right">
+                            <p class="font-semibold font-secondary"><?= htmlspecialchars($user_email ?: 'Guest User') ?></p>
+                            <p class="text-xs text-gray-500 font-secondary"><?= htmlspecialchars($user_role_display) ?></p>
+                        </div>
+                        <div class="w-10 h-10 bg-crimson-700 rounded-full flex items-center justify-center text-white font-bold">
+                            <?= htmlspecialchars($user_initials) ?>
                         </div>
                     </div>
                 </div>
@@ -786,11 +801,11 @@ $avatar_colors = [
                             </div>
 
                             <div class="flex flex-col sm:flex-row gap-3">
-                                <button type="submit" name="save_as_draft" value="1"
+                                <button type="submit" name="save_as_draft" value="1" id="draftBtn"
                                     class="flex-1 bg-gray-200 text-gray-700 font-bold py-3 px-6 rounded-lg hover:bg-gray-300 focus:outline-none focus:ring-4 focus:ring-gray-300 transition duration-200 font-secondary">
                                     Save as Draft
                                 </button>
-                                <button type="submit"
+                                <button type="submit" id="submitBtn"
                                     class="flex-1 bg-crimson-700 text-white font-bold py-3 px-6 rounded-lg hover:bg-crimson-800 focus:outline-none focus:ring-4 focus:ring-crimson-300 transition duration-200 transform hover:scale-[1.02] active:scale-[0.98] font-secondary">
                                     Submit Document
                                 </button>
@@ -801,6 +816,9 @@ $avatar_colors = [
             </div>
         </div>
     </main>
+
+    <!-- Global Autocomplete Dropdown -->
+    <div id="globalAcDropdown"></div>
 
     <script>
         // Form templates for each document type
@@ -817,13 +835,24 @@ $avatar_colors = [
                             <input type="date" name="date_issued" class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-crimson-700" value="<?= htmlspecialchars($_POST['date_issued'] ?? date('Y-m-d')) ?>">
                         </div>
                     </div>
-                    <div>
-                        <label class="block text-sm font-semibold text-gray-700 mb-2">Concerned Faculty <span class="text-red-500">*</span></label>
-                        <div class="ac-wrapper">
-                            <input type="text" name="concerned_faculty" id="concernedFaculty" class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-crimson-700" placeholder="Enter faculty name" value="<?= htmlspecialchars($_POST['concerned_faculty'] ?? '') ?>">
-                            <div id="facultyDropdown" class="ac-dropdown"></div>
+                    
+                    <div class="mp-fac-section">
+                        <div class="flex items-center justify-between mb-2">
+                            <label class="block text-sm font-semibold text-gray-700">Concerned Faculty <span class="text-red-500">*</span></label>
+                            <button type="button" onclick="addFacultyField('facultyList')"
+                                    class="inline-flex items-center px-3 py-1.5 bg-crimson-700 text-white text-sm font-semibold rounded-lg hover:bg-crimson-800 transition">
+                                ＋ Add Faculty
+                            </button>
+                        </div>
+                        <div id="facultyList">
+                            <div class="mp-fac-row flex items-center gap-2 mb-2">
+                                <input type="text" name="concerned_faculty[]" placeholder="Full name of faculty member"
+                                       class="concerned-faculty-input flex-1 px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-crimson-700" required>
+                                <button type="button" class="mp-fac-remove-btn text-red-600 hover:text-red-800 p-1 hidden" onclick="removeFacultyField(this, 'facultyList')" title="Remove">✕</button>
+                            </div>
                         </div>
                     </div>
+
                     <div>
                         <label class="block text-sm font-semibold text-gray-700 mb-2">College/Department</label>
                         <input type="text" name="college_dept" class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-crimson-700" placeholder="e.g., College of Computing Studies" value="<?= htmlspecialchars($_POST['college_dept'] ?? '') ?>">
@@ -868,13 +897,24 @@ $avatar_colors = [
                             <input type="date" name="date_issued" class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-crimson-700" value="<?= htmlspecialchars($_POST['date_issued'] ?? date('Y-m-d')) ?>">
                         </div>
                     </div>
-                    <div>
-                        <label class="block text-sm font-semibold text-gray-700 mb-2">Concerned Faculty <span class="text-red-500">*</span></label>
-                        <div class="ac-wrapper">
-                            <input type="text" name="concerned_faculty" id="concernedFaculty" class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-crimson-700" placeholder="Enter faculty name" value="<?= htmlspecialchars($_POST['concerned_faculty'] ?? '') ?>">
-                            <div id="facultyDropdown" class="ac-dropdown"></div>
+                    
+                    <div class="mp-fac-section">
+                        <div class="flex items-center justify-between mb-2">
+                            <label class="block text-sm font-semibold text-gray-700">Concerned Faculty <span class="text-red-500">*</span></label>
+                            <button type="button" onclick="addFacultyField('specialFacultyList')"
+                                    class="inline-flex items-center px-3 py-1.5 bg-crimson-700 text-white text-sm font-semibold rounded-lg hover:bg-crimson-800 transition">
+                                ＋ Add Faculty
+                            </button>
+                        </div>
+                        <div id="specialFacultyList">
+                            <div class="mp-fac-row flex items-center gap-2 mb-2">
+                                <input type="text" name="concerned_faculty[]" placeholder="Full name of faculty member"
+                                       class="concerned-faculty-input flex-1 px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-crimson-700" required>
+                                <button type="button" class="mp-fac-remove-btn text-red-600 hover:text-red-800 p-1 hidden" onclick="removeFacultyField(this, 'specialFacultyList')" title="Remove">✕</button>
+                            </div>
                         </div>
                     </div>
+
                     <div>
                         <label class="block text-sm font-semibold text-gray-700 mb-2">Subject <span class="text-red-500">*</span></label>
                         <textarea name="subject" rows="3" class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-crimson-700" placeholder="Document subject"><?= htmlspecialchars($_POST['subject'] ?? '') ?></textarea>
@@ -905,13 +945,25 @@ $avatar_colors = [
                             <input type="date" name="date_issued" class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-crimson-700" value="<?= htmlspecialchars($_POST['date_issued'] ?? date('Y-m-d')) ?>">
                         </div>
                     </div>
-                    <div>
-                        <label class="block text-sm font-semibold text-gray-700 mb-2">Employee Name <span class="text-red-500">*</span></label>
-                        <div class="ac-wrapper">
-                            <input type="text" name="employee_name" id="employeeName" class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-crimson-700" placeholder="Enter employee name" value="<?= htmlspecialchars($_POST['employee_name'] ?? '') ?>">
-                            <div id="employeeDropdown" class="ac-dropdown"></div>
+
+                    <!-- Concerned Faculty section (dynamic) -->
+                    <div class="mp-fac-section">
+                        <div class="flex items-center justify-between mb-2">
+                            <label class="block text-sm font-semibold text-gray-700">Concerned Faculty <span class="text-red-500">*</span></label>
+                            <button type="button" onclick="addFacultyField('travelFacultyList')"
+                                    class="inline-flex items-center px-3 py-1.5 bg-crimson-700 text-white text-sm font-semibold rounded-lg hover:bg-crimson-800 transition">
+                                ＋ Add Faculty
+                            </button>
+                        </div>
+                        <div id="travelFacultyList">
+                            <div class="mp-fac-row flex items-center gap-2 mb-2">
+                                <input type="text" name="concerned_faculty[]" placeholder="Full name of faculty member"
+                                       class="concerned-faculty-input flex-1 px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-crimson-700" required>
+                                <button type="button" class="mp-fac-remove-btn text-red-600 hover:text-red-800 p-1 hidden" onclick="removeFacultyField(this, 'travelFacultyList')" title="Remove">✕</button>
+                            </div>
                         </div>
                     </div>
+
                     <div>
                         <label class="block text-sm font-semibold text-gray-700 mb-2">Office/Department</label>
                         <input type="text" name="office" class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-crimson-700" placeholder="e.g., IT Department" value="<?= htmlspecialchars($_POST['office'] ?? '') ?>">
@@ -956,75 +1008,126 @@ $avatar_colors = [
             `
         };
 
-        let debounceTimer;
-        
-        function setupAutocomplete(inputId, dropdownId) {
-            const input = document.getElementById(inputId);
-            if (!input) return;
-            
-            input.addEventListener('input', function() {
-                clearTimeout(debounceTimer);
-                const query = this.value.trim();
-                const dropdown = document.getElementById(dropdownId);
-                
-                if (query.length < 2) {
-                    dropdown.classList.remove('is-open');
-                    return;
-                }
-                
-                debounceTimer = setTimeout(() => {
-                    fetch(`../api/autocomplete.php?q=${encodeURIComponent(query)}`)
-                        .then(r => r.json())
-                        .then(results => {
-                            dropdown.innerHTML = '';
-                            if (results.length === 0) {
-                                dropdown.innerHTML = '<div class="ac-empty">No users found.</div>';
-                                dropdown.classList.add('is-open');
-                                return;
-                            }
-                            
-                            results.forEach(r => {
+        // Global autocomplete
+        let autocompleteTimer;
+        let activeAcInput = null;
+        const acDropdown = document.getElementById('globalAcDropdown');
+
+        // Attach autocomplete to all .concerned-faculty-input fields via event delegation
+        document.addEventListener('input', function(e) {
+            if (!e.target.classList.contains('concerned-faculty-input')) return;
+            const input = e.target;
+            const query = input.value.trim();
+            if (query.length < 2) {
+                acDropdown.style.display = 'none';
+                activeAcInput = null;
+                return;
+            }
+            activeAcInput = input;
+            clearTimeout(autocompleteTimer);
+            autocompleteTimer = setTimeout(() => {
+                fetch('../api/autocomplete.php?q=' + encodeURIComponent(query))
+                    .then(r => r.json())
+                    .then(results => {
+                        acDropdown.innerHTML = '';
+                        if (!results.length) {
+                            acDropdown.innerHTML = '<div class="ac-empty">No users found.</div>';
+                        } else {
+                            results.forEach(user => {
                                 const item = document.createElement('div');
                                 item.className = 'ac-item';
-                                item.innerHTML = `<div class="ac-item-name">${escapeHtml(r.name)}</div><div class="ac-item-meta">${escapeHtml(r.department)} &middot; ${escapeHtml(r.role)}</div>`;
+                                item.innerHTML = `<div class="ac-item-name">${escapeHtml(user.name)}</div><div class="ac-item-meta">${escapeHtml(user.department)} · ${escapeHtml(user.role)}</div>`;
                                 item.addEventListener('mousedown', (e) => {
                                     e.preventDefault();
-                                    input.value = r.name;
-                                    dropdown.classList.remove('is-open');
+                                    input.value = user.name;
+                                    acDropdown.style.display = 'none';
+                                    activeAcInput = null;
                                 });
-                                dropdown.appendChild(item);
+                                acDropdown.appendChild(item);
                             });
-                            dropdown.classList.add('is-open');
-                        })
-                        .catch(() => dropdown.classList.remove('is-open'));
-                }, 300);
-            });
-            
-            document.addEventListener('click', (e) => {
-                if (!e.target.closest('.ac-wrapper')) {
-                    document.getElementById(dropdownId)?.classList.remove('is-open');
-                }
-            });
-        }
-        
+                        }
+                        const rect = input.getBoundingClientRect();
+                        acDropdown.style.top = (rect.bottom + window.scrollY + 4) + 'px';
+                        acDropdown.style.left = (rect.left + window.scrollX) + 'px';
+                        acDropdown.style.display = 'block';
+                    })
+                    .catch(() => acDropdown.style.display = 'none');
+            }, 300);
+        });
+
+        // Hide dropdown on outside click
+        document.addEventListener('click', function(e) {
+            if (!e.target.classList.contains('concerned-faculty-input')) {
+                acDropdown.style.display = 'none';
+                activeAcInput = null;
+            }
+        });
+
+        // Escape key
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                acDropdown.style.display = 'none';
+                activeAcInput = null;
+            }
+        });
+
         function escapeHtml(str) {
             return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
         }
-        
+
+        // Dynamic faculty fields
+        function addFacultyField(containerId) {
+            const container = document.getElementById(containerId);
+            if (!container) return;
+            const row = document.createElement('div');
+            row.className = 'mp-fac-row flex items-center gap-2 mb-2';
+            row.innerHTML = `
+                <input type="text" name="concerned_faculty[]" placeholder="Full name of faculty member"
+                       class="concerned-faculty-input flex-1 px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-crimson-700">
+                <button type="button" class="mp-fac-remove-btn text-red-600 hover:text-red-800 p-1"
+                        onclick="removeFacultyField(this, '${containerId}')" title="Remove">✕</button>
+            `;
+            container.appendChild(row);
+            row.querySelector('input').focus();
+            updateRemoveButtons(containerId);
+        }
+
+        function removeFacultyField(btn, containerId) {
+            const row = btn.closest('.mp-fac-row');
+            if (!row) return;
+            const container = document.getElementById(containerId);
+            if (container.querySelectorAll('.mp-fac-row').length <= 1) {
+                row.querySelector('input').value = '';
+                return;
+            }
+            row.remove();
+            updateRemoveButtons(containerId);
+        }
+
+        function updateRemoveButtons(containerId) {
+            const container = document.getElementById(containerId);
+            if (!container) return;
+            const rows = container.querySelectorAll('.mp-fac-row');
+            rows.forEach(row => {
+                const btn = row.querySelector('.mp-fac-remove-btn');
+                if (btn) btn.classList.toggle('hidden', rows.length === 1);
+            });
+        }
+
+        // Handle document type change
         function handleDocumentTypeChange(value) {
             const container = document.getElementById('dynamicFormContainer');
             if (value && formTemplates[value]) {
                 container.innerHTML = formTemplates[value];
-                if (value === 'memorandum' || value === 'special_order') {
-                    setupAutocomplete('concernedFaculty', 'facultyDropdown');
-                } else if (value === 'travel_order') {
-                    setupAutocomplete('employeeName', 'employeeDropdown');
-                }
+                // Ensure remove button visibility
+                if (value === 'memorandum') updateRemoveButtons('facultyList');
+                else if (value === 'special_order') updateRemoveButtons('specialFacultyList');
+                else if (value === 'travel_order') updateRemoveButtons('travelFacultyList');
             } else {
                 container.innerHTML = '';
             }
         }
-        
+
         // File upload handling
         const fileUpload = document.getElementById('fileUpload');
         const fileList = document.getElementById('fileList');
@@ -1076,7 +1179,6 @@ $avatar_colors = [
                 fileList.appendChild(item);
             });
             
-            // Update the file input with the current file list
             const dataTransfer = new DataTransfer();
             uploadedFiles.forEach(file => dataTransfer.items.add(file));
             fileUpload.files = dataTransfer.files;

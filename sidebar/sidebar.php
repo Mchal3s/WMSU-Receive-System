@@ -4,18 +4,17 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 // BASE PATH (IMPORTANT)
-$base = '/WMSU-Receive-System/';
+$_app_root = rtrim(str_replace('\\', '/', realpath(__DIR__ . '/..')), '/');
+$_doc_root = rtrim(str_replace('\\', '/', realpath($_SERVER['DOCUMENT_ROOT'])), '/');
+$_rel = str_replace($_doc_root, '', $_app_root);
+$base = rtrim($_rel, '/') . '/';
 
 // Detect current page + folder
 $current_page = basename($_SERVER['PHP_SELF']);
 $current_dir  = basename(dirname($_SERVER['PHP_SELF']));
 
-// Fetch unread inbox count for the current user on every page
-// (inbox.php sets $inbox_unread itself before including sidebar,
-//  so we only query here when it hasn't been set yet)
+// Fetch unread inbox count for the current user
 if (!isset($inbox_unread) && !empty($_SESSION['user_email'])) {
-    // db.php is already loaded by every page that includes this sidebar,
-    // but guard with function_exists just in case
     if (function_exists('getPDO')) {
         try {
             $pdo_sidebar = getPDO();
@@ -50,7 +49,7 @@ function navLink($href, $icon, $label, $matchPage, $matchDir = '') {
     ";
 }
 
-// INBOX NAV LINK — same as navLink() but with an unread badge
+// INBOX NAV LINK
 function inboxNavLink($href, $matchPage) {
     global $current_page, $inbox_unread;
 
@@ -79,56 +78,34 @@ function inboxNavLink($href, $matchPage) {
 <aside id="sidebar" class="fixed top-0 left-0 h-full w-64 bg-red-900 text-white flex flex-col justify-between shadow-2xl z-40 -translate-x-full lg:translate-x-0 transition-transform duration-300">
 
     <!-- Branding -->
-    <div class="bg-red-800 px-6 py-6 border-b border-red-700">
-        <h1 class="text-2xl font-bold">WMSU</h1>
-        <p class="text-xs text-red-300 mt-1">Document Management</p>
+    <div class="bg-red-800 px-6 py-6 border-b border-red-700 flex items-center gap-4">
+        <img src="<?= $base ?>logo.png" alt="WMSU Logo" class="h-12 w-12 object-contain">
+        <div>
+            <h1 class="text-2xl font-bold">WMSU</h1>
+            <p class="text-xs text-red-300 mt-1">Document Management</p>
+        </div>
     </div>
 
-    <!-- Navigation -->
-    <nav class="px-4 py-6 flex-1">
+    <!-- Navigation (Scrollable if menu is long) -->
+    <nav class="px-4 py-6 flex-1 overflow-y-auto">
         <ul class="space-y-2">
-
-            <!-- DASHBOARD -->
-            <li>
-                <?= navLink($base . 'dashboard/dashboard.php', 'fa-house', 'Dashboard', 'dashboard.php', 'dashboard') ?>
-            </li>
-
-            <!-- RECEIVING -->
-            <li>
-                <?= navLink($base . 'pages/receiving.php', 'fa-receipt', 'Receiving', 'receiving.php') ?>
-            </li>
-
-            <!-- INBOX (with unread badge) -->
-            <li>
-                <?= inboxNavLink($base . 'pages/inbox.php', 'inbox.php') ?>
-            </li>
-
-            <!-- RELEASE -->
-            <li>
-                <?= navLink($base . 'pages/release.php', 'fa-paper-plane', 'Release', 'release.php') ?>
-            </li>
-
-            <!-- ARCHIVE -->
-            <li>
-                <?= navLink($base . 'archive.php', 'fa-archive', 'Archive', 'archive.php') ?>
-            </li>
-
-            <!-- INVENTORY -->
-            <li>
-                <?= navLink('#', 'fa-boxes-stacked', 'Inventory', '') ?>
-            </li>
-
+            <li><?= navLink($base . 'dashboard/dashboard.php', 'fa-house', 'Dashboard', 'dashboard.php', 'dashboard') ?></li>
+            <li><?= navLink($base . 'pages/receiving.php', 'fa-receipt', 'Receiving', 'receiving.php') ?></li>
+            <li><?= inboxNavLink($base . 'pages/inbox.php', 'inbox.php') ?></li>
+            <li><?= navLink($base . 'pages/release.php', 'fa-paper-plane', 'Release', 'release.php') ?></li>
+            <?php if (is_admin()): ?>
+            <li><?= navLink($base . 'pages/user_management.php', 'fa-users', 'User Management', 'user_management.php') ?></li>
+            <?php endif; ?>
+            <li><?= navLink($base . 'pages/trash.php', 'fa-trash-can', 'Trash', 'trash.php') ?></li>
         </ul>
-
-    
     </nav>
-    
- 
 
-        <hr class="my-6 border-red-700">
-
+    <!-- FOOTER SECTION (User info + Logout) -->
+    <div class="px-4 pb-8"> <!-- Added pb-8 for significant bottom space -->
+        <hr class="mb-6 border-red-700">
+        
         <!-- USER INFO -->
-        <div class="px-4 py-3 mb-3 bg-red-800 rounded-lg">
+        <div class="px-4 py-3 mb-2 bg-red-800/50 rounded-lg">
             <p class="text-xs text-red-300 mb-1">Logged in as</p>
             <p class="text-sm font-semibold truncate">
                 <?= htmlspecialchars($_SESSION['user_email'] ?? 'Unknown') ?>
@@ -139,9 +116,10 @@ function inboxNavLink($href, $matchPage) {
         </div>
 
         <!-- LOGOUT -->
-        <a href="<?= $base ?>logout.php" class="flex items-center px-4 py-3 rounded-lg hover:bg-red-800 transition-colors">
+        <a href="<?= $base ?>logout.php" class="flex items-center px-4 py-3 rounded-lg hover:bg-red-700 transition-colors text-red-100">
             <span class="mr-3"><i class="fa-solid fa-right-from-bracket"></i></span> Logout
         </a>
+    </div>
 </aside>
 
 <!-- FONT AWESOME -->
