@@ -40,11 +40,15 @@ $query = "
         m.status,
         COUNT(dr.id) as total_recipients,
         SUM(CASE WHEN dr.status = 'Received' THEN 1 ELSE 0 END) as received_count,
-        GROUP_CONCAT(DISTINCT dr.recipient_name) as recipients
+        GROUP_CONCAT(DISTINCT dr.recipient_name) as recipients,
+        df.file_path,
+        df.original_name as file_name,
+        df.ocr_text
     FROM memorandum_orders m
     LEFT JOIN document_recipients dr ON dr.document_id = m.id 
         AND dr.document_type = 'Memorandum Order'
-    " . ($isAdmin ? "" : "WHERE m.created_by = ?") . "
+    LEFT JOIN document_files df ON df.document_id = m.id AND df.document_type = 'memorandum_order'
+    " . ($isAdmin ? "WHERE m.deleted_at IS NULL" : "WHERE m.created_by = ? AND m.deleted_at IS NULL") . "
     GROUP BY m.id
 
     UNION ALL
@@ -61,11 +65,15 @@ $query = "
         s.status,
         COUNT(dr.id) as total_recipients,
         SUM(CASE WHEN dr.status = 'Received' THEN 1 ELSE 0 END) as received_count,
-        GROUP_CONCAT(DISTINCT dr.recipient_name) as recipients
+        GROUP_CONCAT(DISTINCT dr.recipient_name) as recipients,
+        df.file_path,
+        df.original_name as file_name,
+        df.ocr_text
     FROM special_orders s
     LEFT JOIN document_recipients dr ON dr.document_id = s.id 
         AND dr.document_type = 'Special Order'
-    " . ($isAdmin ? "" : "WHERE s.created_by = ?") . "
+    LEFT JOIN document_files df ON df.document_id = s.id AND df.document_type = 'special_order'
+    " . ($isAdmin ? "WHERE s.deleted_at IS NULL" : "WHERE s.created_by = ? AND s.deleted_at IS NULL") . "
     GROUP BY s.id
 
     UNION ALL
@@ -82,11 +90,15 @@ $query = "
         t.status,
         COUNT(dr.id) as total_recipients,
         SUM(CASE WHEN dr.status = 'Received' THEN 1 ELSE 0 END) as received_count,
-        GROUP_CONCAT(DISTINCT dr.recipient_name) as recipients
+        GROUP_CONCAT(DISTINCT dr.recipient_name) as recipients,
+        df.file_path,
+        df.original_name as file_name,
+        df.ocr_text
     FROM travel_orders t
     LEFT JOIN document_recipients dr ON dr.document_id = t.id 
         AND dr.document_type = 'Travel Order'
-    " . ($isAdmin ? "" : "WHERE t.created_by = ?") . "
+    LEFT JOIN document_files df ON df.document_id = t.id AND df.document_type = 'travel_order'
+    " . ($isAdmin ? "WHERE t.deleted_at IS NULL" : "WHERE t.created_by = ? AND t.deleted_at IS NULL") . "
     GROUP BY t.id
 
     ORDER BY created_at DESC
@@ -94,7 +106,25 @@ $query = "
 
 $stmt = $pdo->prepare($query);
 $stmt->execute($isAdmin ? [] : [$user_id, $user_id, $user_id]);
-$documents = $stmt->fetchAll(PDO::FETCH_ASSOC);
+$raw_documents = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Group files per document (a document may have multiple file rows)
+$grouped_docs = [];
+foreach ($raw_documents as $doc) {
+    $key = $doc['document_type'] . '_' . $doc['document_id'];
+    if (!isset($grouped_docs[$key])) {
+        $grouped_docs[$key] = $doc;
+        $grouped_docs[$key]['files'] = [];
+    }
+    if (!empty($doc['file_path'])) {
+        $grouped_docs[$key]['files'][] = [
+            'name'     => $doc['file_name'],
+            'path'     => $doc['file_path'],
+            'ocr_text' => $doc['ocr_text'] ?? '',
+        ];
+    }
+}
+$documents = array_values($grouped_docs);
 
 // Function to get recipients with feedback for a specific document
 function getRecipientsWithFeedback($pdo, $document_type, $document_id) {
@@ -115,6 +145,57 @@ function getRecipientsWithFeedback($pdo, $document_type, $document_id) {
     ");
     $stmt->execute([$document_type, $document_id]);
     return $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+
+// Ensure deleted_at columns exist (run once)
+try {
+    $pdo->exec("ALTER TABLE memorandum_orders ADD COLUMN IF NOT EXISTS deleted_at DATETIME DEFAULT NULL");
+    $pdo->exec("ALTER TABLE special_orders ADD COLUMN IF NOT EXISTS deleted_at DATETIME DEFAULT NULL");
+    $pdo->exec("ALTER TABLE travel_orders ADD COLUMN IF NOT EXISTS deleted_at DATETIME DEFAULT NULL");
+} catch (PDOException $e) { /* ignore, column may exist */ }
+
+// ── AJAX: trash a released document (only sender/creator may do this) ────────
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    header('Content-Type: application/json');
+
+    if ($_POST['action'] === 'trash_release') {
+        $doc_type = $_POST['document_type'] ?? '';
+        $doc_id   = (int)($_POST['document_id'] ?? 0);
+
+        if (!$doc_id || !in_array($doc_type, ['Memorandum Order', 'Special Order', 'Travel Order'])) {
+            echo json_encode(['success' => false, 'message' => 'Invalid request.']);
+            exit;
+        }
+
+        // Map type → table and creator column
+        $tableMap = [
+            'Memorandum Order' => ['memorandum_orders', 'created_by'],
+            'Special Order'    => ['special_orders',    'created_by'],
+            'Travel Order'     => ['travel_orders',     'created_by'],
+        ];
+        [$table, $creatorCol] = $tableMap[$doc_type];
+
+        // Verify the current user is the creator
+        $check = $pdo->prepare("SELECT id FROM `$table` WHERE id = ? AND $creatorCol = ? AND deleted_at IS NULL");
+        $check->execute([$doc_id, $user_id]);
+
+        if (!$check->fetch()) {
+            echo json_encode(['success' => false, 'message' => 'Document not found or you are not the sender.']);
+            exit;
+        }
+
+        $stmt = $pdo->prepare("UPDATE `$table` SET deleted_at = NOW() WHERE id = ? AND $creatorCol = ? AND deleted_at IS NULL");
+        $stmt->execute([$doc_id, $user_id]);
+
+        echo json_encode($stmt->rowCount() > 0
+            ? ['success' => true,  'message' => 'Document moved to trash.']
+            : ['success' => false, 'message' => 'Could not move document to trash.']
+        );
+        exit;
+    }
+
+    echo json_encode(['success' => false, 'message' => 'Unknown action.']);
+    exit;
 }
 ?>
 
@@ -164,7 +245,7 @@ function getRecipientsWithFeedback($pdo, $document_type, $document_id) {
                             <span class="block w-5 h-0.5 bg-gray-700 rounded"></span>
                         </button>
                         <div>
-                            <h2 class="text-2xl font-bold text-gray-800 font-main">Release Monitoring</h2>
+                            <h2 class="text-2xl font-bold text-gray-800 font-main mb-1">Release Monitoring</h2>
                             <p class="text-sm text-gray-600 font-secondary">Track who has acknowledged your documents</p>
                         </div>
                     </div>
@@ -256,6 +337,7 @@ function getRecipientsWithFeedback($pdo, $document_type, $document_id) {
                              data-received="<?= $doc['received_count'] ?>"
                              data-total="<?= $doc['total_recipients'] ?>"
                              data-date="<?= $doc['date_issued'] ?>"
+                             data-files="<?= htmlspecialchars(json_encode($doc['files'] ?? [])) ?>"
                              onclick="viewRelease(this)">
                             <div class="flex justify-between items-start">
                                 <div class="flex-1">
@@ -276,6 +358,16 @@ function getRecipientsWithFeedback($pdo, $document_type, $document_id) {
                                         Issued: <?= date('M d, Y', strtotime($doc['date_issued'])) ?>
                                     </p>
                                 </div>
+                                <?php if ($doc['sender_email'] === $user_email): ?>
+                                <button onclick="openReleaseDeleteModal(event, <?= $doc['document_id'] ?>, '<?= htmlspecialchars(addslashes($doc['document_type'])) ?>', '<?= htmlspecialchars(addslashes($doc['subject'])) ?>')"
+                                        class="ml-4 flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-crimson-50 text-crimson-700 hover:bg-crimson-100 border border-crimson-200 rounded-lg transition font-secondary">
+                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                                    </svg>
+                                    Delete
+                                </button>
+                                <?php endif; ?>
+                                  
                             </div>
 
                             <!-- Progress Bar -->
@@ -324,6 +416,12 @@ function getRecipientsWithFeedback($pdo, $document_type, $document_id) {
                     </div>
                 </div>
 
+                <!-- Concerned Faculty row -->
+                <div class="mb-6">
+                    <p class="text-gray-500 text-sm">Concerned Faculty</p>
+                    <p id="modalConcernedFaculty" class="font-medium text-gray-800"></p>
+                </div>
+
                 <div class="mb-6">
                     <p class="font-semibold mb-2">Acknowledgement Status</p>
                     <div class="flex justify-between text-xs mb-1">
@@ -331,7 +429,7 @@ function getRecipientsWithFeedback($pdo, $document_type, $document_id) {
                         <span id="modalProgressPercent" class="font-semibold"></span>
                     </div>
                     <div id="modalProgress" class="h-2 bg-gray-100 rounded-full mb-2 overflow-hidden">
-                        <div class="h-full bg-crimson-600 rounded-full transition-all" style="width: 0%"></div>
+                        <div class="h-full bg-green-500 rounded-full transition-all" style="width: 0%"></div>
                     </div>
                     <div class="flex justify-between text-xs">
                         <span id="modalReceivedCount"></span>
@@ -343,12 +441,53 @@ function getRecipientsWithFeedback($pdo, $document_type, $document_id) {
                     <p class="font-semibold mb-3">Recipients & Feedback:</p>
                     <div id="acknowledgedList" class="space-y-4"></div>
                 </div>
+
+                <!-- Attached Files -->
+                <div class="mt-6" id="releaseFilesSection">
+                    <p class="text-xs text-gray-500 font-secondary mb-2 font-semibold">Attached Files</p>
+                    <div id="releaseModalFiles" class="space-y-2"></div>
+                    <p id="releaseNoFilesMsg" class="text-xs text-gray-400 hidden font-secondary">No files attached.</p>
+                </div>
+
+                <!-- OCR / Soft-copy section -->
+                <div id="releaseOcrSection" class="hidden mt-4 mb-2">
+                    <div class="flex items-center justify-between mb-2">
+                        <p class="text-xs font-semibold text-blue-700 font-secondary uppercase tracking-wide flex items-center gap-1">
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                            </svg>
+                            Scanned Text (Soft Copy)
+                        </p>
+                        <div class="flex gap-2">
+                            <button id="releaseOpenOcrPdfBtn" onclick="openReleaseOcrPDF()" class="flex items-center gap-1 text-xs px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-secondary">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+                                </svg>
+                                Open PDF
+                            </button>
+                            <button id="releaseDownloadOcrPdfBtn" onclick="downloadReleaseOcrPDF()" class="flex items-center gap-1 text-xs px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 transition font-secondary">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+                                </svg>
+                                Download PDF
+                            </button>
+                        </div>
+                    </div>
+                    <div id="releaseOcrTextBox" class="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-gray-700 font-secondary whitespace-pre-wrap max-h-40 overflow-y-auto leading-relaxed"></div>
+                    <p class="text-xs text-gray-400 mt-1 font-secondary">Text automatically extracted from the uploaded image.</p>
+                </div>
             </div>
         </div>
     </div>
 
     <script>
-        const BASE_PATH = '/WMSU-Receive-System';
+        const BASE_PATH = <?php
+            $_rl_root = rtrim(str_replace('\\', '/', realpath(__DIR__ . '/..')), '/');
+            $_rl_doc  = rtrim(str_replace('\\', '/', realpath($_SERVER['DOCUMENT_ROOT'])), '/');
+            echo json_encode(str_replace($_rl_doc, '', $_rl_root));
+        ?>;
+
+        let currentReleaseDocument = null;
 
         async function viewRelease(element) {
             // Get the stored document data
@@ -359,11 +498,33 @@ function getRecipientsWithFeedback($pdo, $document_type, $document_id) {
                 console.error('Error parsing document data', e);
                 return;
             }
+
+            // Parse files from data-files attribute
+            let files = [];
+            try {
+                files = JSON.parse(element.getAttribute('data-files') || '[]');
+            } catch(e) {}
+
+            currentReleaseDocument = {
+                type:   doc.document_type,
+                number: doc.document_number,
+                subject: doc.subject,
+                issued:  doc.date_issued,
+                files:   files
+            };
             
             document.getElementById('modalDocType').textContent = doc.document_type;
             document.getElementById('modalDocNumber').textContent = doc.document_number;
             document.getElementById('modalSubject').textContent = doc.subject;
             document.getElementById('modalDate').textContent = new Date(doc.date_issued).toLocaleDateString('en-US', { year:'numeric', month:'long', day:'numeric' });
+
+            // Concerned Faculty
+            const concernedEl = document.getElementById('modalConcernedFaculty');
+            if (doc.concerned_person && doc.concerned_person.trim() !== '') {
+                concernedEl.textContent = doc.concerned_person;
+            } else {
+                concernedEl.textContent = '—';
+            }
 
             const received = parseInt(doc.received_count) || 0;
             const total = parseInt(doc.total_recipients) || 0;
@@ -375,7 +536,7 @@ function getRecipientsWithFeedback($pdo, $document_type, $document_id) {
             document.getElementById('modalProgressPercent').textContent = `${percent}%`;
             
             const progressBar = document.getElementById('modalProgress');
-            progressBar.innerHTML = `<div class="h-full bg-crimson-600 rounded-full transition-all" style="width:${percent}%"></div>`;
+            progressBar.innerHTML = `<div class="h-full bg-green-500 rounded-full transition-all" style="width:${percent}%"></div>`;
 
             // Fetch recipients with feedback via AJAX
             try {
@@ -423,6 +584,67 @@ function getRecipientsWithFeedback($pdo, $document_type, $document_id) {
             } catch (error) {
                 console.error('Error fetching recipients:', error);
                 document.getElementById('acknowledgedList').innerHTML = '<p class="text-red-500 text-sm">Error loading recipient data.</p>';
+            }
+
+            // ── Populate attached files ───────────────────────────────────────
+            const filesContainer = document.getElementById('releaseModalFiles');
+            const noFilesMsg     = document.getElementById('releaseNoFilesMsg');
+            const ocrSection     = document.getElementById('releaseOcrSection');
+            const ocrTextBox     = document.getElementById('releaseOcrTextBox');
+            filesContainer.innerHTML = '';
+            ocrTextBox.textContent   = '';
+            ocrSection.classList.add('hidden');
+            ocrTextBox.className     = 'bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-gray-700 font-secondary whitespace-pre-wrap max-h-40 overflow-y-auto leading-relaxed';
+
+            const openBtn = document.getElementById('releaseOpenOcrPdfBtn');
+            const downBtn = document.getElementById('releaseDownloadOcrPdfBtn');
+
+            if (files && files.length > 0) {
+                noFilesMsg.classList.add('hidden');
+                let hasValidOcr = false;
+                files.forEach((f, idx) => {
+                    const a = document.createElement('a');
+                    let filePath = f.path.replace(/^\/+/, '');
+                    a.href   = BASE_PATH + '/' + filePath;
+                    a.target = '_blank';
+                    a.className = 'flex items-center gap-3 p-3 bg-gray-50 border border-gray-200 rounded-lg hover:bg-crimson-50 hover:border-crimson-200 transition';
+                    a.innerHTML = `
+                        <svg class="w-5 h-5 text-crimson-700 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                        </svg>
+                        <span class="text-sm font-secondary text-gray-700 truncate">${f.name || 'Attached file'}</span>
+                        <svg class="w-4 h-4 text-gray-400 ml-auto flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+                        </svg>`;
+                    filesContainer.appendChild(a);
+
+                    if (idx === 0 && f.name && f.name.match(/\.(jpe?g|png)$/i)) {
+                        if (f.ocr_text && f.ocr_text.trim()) {
+                            ocrTextBox.textContent = f.ocr_text.trim();
+                            hasValidOcr = true;
+                        } else {
+                            ocrTextBox.textContent = '⚠ No text was extracted from this image. The sender may have submitted the document before OCR completed, or the image quality was insufficient. PDF generation is disabled.';
+                            ocrTextBox.classList.add('text-red-700', 'bg-red-50', 'border-red-200');
+                        }
+                        ocrSection.classList.remove('hidden');
+                    } else if (idx === 0) {
+                        ocrTextBox.textContent = 'The attached document is not an image (PDF/DOC). No scanned text available.';
+                        ocrTextBox.classList.add('text-gray-600', 'bg-gray-100', 'border-gray-300');
+                        ocrSection.classList.remove('hidden');
+                    }
+                });
+
+                if (hasValidOcr) {
+                    if (openBtn) { openBtn.disabled = false; openBtn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+                    if (downBtn) { downBtn.disabled = false; downBtn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+                    ocrTextBox.classList.remove('text-red-700', 'bg-red-50', 'border-red-200');
+                } else {
+                    if (openBtn) { openBtn.disabled = true; openBtn.classList.add('opacity-50', 'cursor-not-allowed'); }
+                    if (downBtn) { downBtn.disabled = true; downBtn.classList.add('opacity-50', 'cursor-not-allowed'); }
+                }
+            } else {
+                noFilesMsg.classList.remove('hidden');
+                ocrSection.classList.add('hidden');
             }
 
             document.getElementById('releaseModal').classList.remove('hidden');
@@ -567,5 +789,211 @@ function getRecipientsWithFeedback($pdo, $document_type, $document_id) {
     </script>
 
     <script src="../js/sidebar.js"></script>
-</body>
+
+    <!-- jsPDF for soft-copy PDF generation -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script>
+    function buildReleaseOcrPDF() {
+        if (!currentReleaseDocument) return null;
+        const rawText = document.getElementById('releaseOcrTextBox').textContent.trim();
+        if (!rawText || rawText.startsWith('⚠') || rawText.includes('No text was extracted')) return null;
+
+        const { jsPDF } = window.jspdf;
+        const doc     = new jsPDF({ unit: 'mm', format: 'a4' });
+        const pageW   = doc.internal.pageSize.getWidth();
+        const pageH   = doc.internal.pageSize.getHeight();
+        const margin  = 20;
+        const usableW = pageW - margin * 2;
+        let y = margin;
+
+        function newPage() { doc.addPage(); y = margin; drawBorder(); }
+        function checkY(need) { if (y + need > pageH - margin) newPage(); }
+        function drawBorder() {
+            doc.setDrawColor(170, 0, 3); doc.setLineWidth(0.5);
+            doc.rect(10, 10, pageW - 20, pageH - 20);
+        }
+        drawBorder();
+
+        doc.setFillColor(170, 0, 3);
+        doc.rect(margin, y, usableW, 18, 'F');
+        doc.setTextColor(255, 255, 255); doc.setFont('helvetica', 'bold'); doc.setFontSize(13);
+        doc.text('Western Mindanao State University', pageW / 2, y + 7, { align: 'center' });
+        doc.setFontSize(9); doc.setFont('helvetica', 'normal');
+        doc.text('Document Management System — Soft Copy', pageW / 2, y + 13, { align: 'center' });
+        y += 23;
+
+        doc.setDrawColor(170, 0, 3); doc.setLineWidth(0.8);
+        doc.line(margin, y, margin + usableW, y); y += 6;
+
+        const details = [
+            ['Document Type', currentReleaseDocument.type   || 'N/A'],
+            ['Document No.',  currentReleaseDocument.number || 'N/A'],
+            ['Subject',       currentReleaseDocument.subject || 'N/A'],
+            ['Date Issued',   currentReleaseDocument.issued ? new Date(currentReleaseDocument.issued).toLocaleDateString('en-PH', {year:'numeric',month:'long',day:'numeric'}) : 'N/A'],
+        ];
+        const labelW = 48, valueW = usableW - labelW - 2;
+        details.forEach(([label, value]) => {
+            doc.setFontSize(8.5);
+            const lines = doc.splitTextToSize(value, valueW);
+            const rowH  = Math.max(7, lines.length * 5 + 2);
+            checkY(rowH + 1);
+            doc.setFillColor(245, 245, 245); doc.rect(margin, y, labelW, rowH, 'F');
+            doc.setDrawColor(220, 220, 220); doc.setLineWidth(0.2); doc.rect(margin, y, labelW, rowH);
+            doc.setFont('helvetica', 'bold'); doc.setTextColor(80, 80, 80); doc.text(label, margin + 2, y + 4.5);
+            doc.setFillColor(255, 255, 255); doc.rect(margin + labelW + 2, y, valueW, rowH, 'F');
+            doc.rect(margin + labelW + 2, y, valueW, rowH);
+            doc.setFont('helvetica', 'normal'); doc.setTextColor(30, 30, 30); doc.text(lines, margin + labelW + 4, y + 4.5);
+            y += rowH + 1;
+        });
+        y += 6;
+
+        checkY(14);
+        doc.setFillColor(219, 234, 254); doc.rect(margin, y, usableW, 10, 'F');
+        doc.setDrawColor(147, 197, 253); doc.setLineWidth(0.3); doc.rect(margin, y, usableW, 10);
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(29, 78, 216);
+        doc.text('Scanned Text (Soft Copy)', margin + 3, y + 6.5); y += 13;
+
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(30, 30, 30);
+        const textLines = doc.splitTextToSize(rawText, usableW - 6);
+        textLines.forEach(line => { checkY(6); doc.text(line, margin + 3, y); y += 5.2; });
+        y += 8;
+
+        checkY(12);
+        doc.setDrawColor(200, 200, 200); doc.setLineWidth(0.3);
+        doc.line(margin, y, margin + usableW, y); y += 5;
+        const now = new Date().toLocaleString('en-PH', {year:'numeric',month:'long',day:'numeric',hour:'2-digit',minute:'2-digit'});
+        doc.setFont('helvetica', 'italic'); doc.setFontSize(7.5); doc.setTextColor(150, 150, 150);
+        doc.text('Generated by WMSU Document Management System on ' + now, pageW / 2, y + 4, { align: 'center' });
+
+        const total = doc.internal.getNumberOfPages();
+        for (let p = 1; p <= total; p++) {
+            doc.setPage(p);
+            doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(150, 150, 150);
+            doc.text('Page ' + p + ' of ' + total, pageW - margin, pageH - 12, { align: 'right' });
+        }
+        return doc;
+    }
+
+    function openReleaseOcrPDF() {
+        const doc = buildReleaseOcrPDF();
+        if (!doc) { alert('No valid scanned text available to generate PDF.'); return; }
+        window.open(doc.output('bloburl'), '_blank');
+    }
+
+    function downloadReleaseOcrPDF() {
+        const doc = buildReleaseOcrPDF();
+        if (!doc) { alert('No valid scanned text available to generate PDF.'); return; }
+        const num  = (currentReleaseDocument.number || 'document').replace(/[^a-zA-Z0-9\-_]/g, '_');
+        const type = (currentReleaseDocument.type   || 'doc').replace(/\s+/g, '_');
+        doc.save('WMSU_' + type + '_' + num + '_softcopy.pdf');
+    }
+    </script>
 </html>
+
+<!-- Release Delete Confirmation Modal -->
+<div id="releaseDeleteModal" class="fixed inset-0 bg-black/50 hidden items-center justify-center z-50 p-4">
+    <div class="bg-white w-full max-w-md rounded-2xl shadow-2xl overflow-hidden">
+        <div class="px-6 py-5 border-b border-gray-100 flex items-center justify-between">
+            <h3 class="text-lg font-bold text-gray-800 font-main">Move to Trash</h3>
+            <button onclick="closeReleaseDeleteModal()" class="text-gray-400 hover:text-gray-600 text-2xl leading-none">&times;</button>
+        </div>
+        <div class="px-6 py-6">
+            <div class="flex items-start gap-4">
+                <div class="w-11 h-11 rounded-full bg-crimson-50 flex items-center justify-center flex-shrink-0">
+                    <svg class="w-5 h-5 text-crimson-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                    </svg>
+                </div>
+                <div>
+                    <p class="text-sm text-gray-700 font-secondary">Are you sure you want to move this document to Trash?</p>
+                    <p id="releaseDeleteModalSubject" class="text-sm font-bold text-gray-900 font-secondary mt-0.5 truncate"></p>
+                    <p class="text-xs text-gray-400 font-secondary mt-2">The document will be hidden from Release Monitoring. You can restore or permanently delete it in Trash.</p>
+                </div>
+            </div>
+        </div>
+        <div class="px-6 py-4 bg-gray-50 flex items-center justify-end gap-3">
+            <button onclick="closeReleaseDeleteModal()"
+                class="px-4 py-2 text-sm font-semibold text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-100 transition font-secondary">
+                Cancel
+            </button>
+            <button id="releaseDeleteConfirmBtn"
+                class="px-4 py-2 text-sm font-semibold bg-crimson-700 text-white rounded-lg hover:bg-crimson-800 transition font-secondary">
+                Move to Trash
+            </button>
+        </div>
+    </div>
+</div>
+
+<script>
+    let _releaseDeleteDocId   = null;
+    let _releaseDeleteDocType = null;
+
+    function openReleaseDeleteModal(event, docId, docType, subject) {
+        event.stopPropagation();
+        _releaseDeleteDocId   = docId;
+        _releaseDeleteDocType = docType;
+        document.getElementById('releaseDeleteModalSubject').textContent = subject;
+        const modal = document.getElementById('releaseDeleteModal');
+        modal.classList.remove('hidden');
+        modal.classList.add('flex');
+    }
+
+    function closeReleaseDeleteModal() {
+        const modal = document.getElementById('releaseDeleteModal');
+        modal.classList.add('hidden');
+        modal.classList.remove('flex');
+        _releaseDeleteDocId   = null;
+        _releaseDeleteDocType = null;
+    }
+
+    document.getElementById('releaseDeleteModal').addEventListener('click', function(e) {
+        if (e.target === this) closeReleaseDeleteModal();
+    });
+
+    document.getElementById('releaseDeleteConfirmBtn').addEventListener('click', async function() {
+        if (!_releaseDeleteDocId || !_releaseDeleteDocType) return;
+
+        this.disabled    = true;
+        this.textContent = 'Moving…';
+
+        const targetId   = parseInt(_releaseDeleteDocId);
+        const targetType = _releaseDeleteDocType;
+
+        try {
+            const fd = new FormData();
+            fd.append('action',        'trash_release');
+            fd.append('document_id',   targetId);
+            fd.append('document_type', targetType);
+
+            const res  = await fetch('', { method: 'POST', body: fd });
+            const data = await res.json();
+
+            if (data.success) {
+                closeReleaseDeleteModal();
+
+                document.querySelectorAll('.release-card').forEach(card => {
+                    try {
+                        const doc = JSON.parse(card.getAttribute('data-document'));
+                        if (parseInt(doc.document_id) === targetId && doc.document_type === targetType) {
+                            card.style.transition = 'opacity 0.3s ease, transform 0.3s ease';
+                            card.style.opacity    = '0';
+                            card.style.transform  = 'translateX(40px)';
+                            setTimeout(() => card.remove(), 320);
+                        }
+                    } catch(e) {}
+                });
+
+                Swal.fire({ icon: 'success', title: 'Moved to Trash', text: 'Document has been moved to Trash.', timer: 1800, showConfirmButton: false });
+            } else {
+                closeReleaseDeleteModal();
+                Swal.fire({ icon: 'error', title: 'Error', text: data.message, confirmButtonColor: '#AA0003' });
+            }
+        } catch (e) {
+            closeReleaseDeleteModal();
+            Swal.fire({ icon: 'error', title: 'Error', text: 'Could not move document to trash.', confirmButtonColor: '#AA0003' });
+        }
+
+        this.disabled    = false;
+        this.textContent = 'Move to Trash';
+    });
+</script>
